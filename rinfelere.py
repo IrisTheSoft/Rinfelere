@@ -1,9 +1,18 @@
+import bisect as BS
 import dataclasses as DC
 import datetime as DT
 import enum as E
 import heapq as HQ
 import itertools as ITR
 import xml.etree.ElementTree as XML
+
+
+time_zone = DT.timezone(DT.timedelta(hours=-5))
+epoch = DT.datetime(2025, 3, 20, 4, 1, tzinfo=time_zone)
+
+
+class OutOfCalendarBoundaries(Exception):
+    pass
 
 
 class Event(E.Enum):
@@ -29,12 +38,8 @@ class TimedEvent:
         yield self.name
 
     def __str__(self):
-        name = f" {self.name}" if self.event == Event.day else ""
-        return f"[{self.moment}] {self.event.name.upper()}{name}"
-
-
-ref_tz = DT.timedelta(hours=-5)
-epoch = DT.datetime(2025, 3, 20, 4, 1) - ref_tz
+        return f"[{self.moment.astimezone(None)}] {self.event.name.upper()}" \
+            + f" {self.name}" if self.event == Event.day else ""
 
 
 def generate_equinoxes_and_solstices():
@@ -48,10 +53,10 @@ def generate_equinoxes_and_solstices():
             .iterfind("./tbody/tr/td")
         events = ITR.cycle([Event.equinox, Event.solstice])
         for cell in cells:
-            yield TimedEvent(DT.datetime.strptime(
+            moment = DT.datetime.strptime(
                 f"{year} {cell.text} {next(cells).text}",
-                "%Y %d %b %H:%M"
-            ) - ref_tz, next(events), f"{next(names)}")
+                "%Y %d %b %H:%M").replace(tzinfo=time_zone)
+            yield TimedEvent(moment, next(events), f"{next(names)}")
 
 
 def generate_moon_phases():
@@ -68,10 +73,10 @@ def generate_moon_phases():
             if cell.text is None:
                 skips = 4 if event == Event.full_moon else 3
                 continue
-            yield TimedEvent(DT.datetime.strptime(
+            moment = DT.datetime.strptime(
                 f"{year} {cell.text} {next(cells).text}",
-                "%Y %d %b %H:%M"
-            ) - ref_tz, event, "")
+                "%Y %d %b %H:%M").replace(tzinfo=time_zone)
+            yield TimedEvent(moment, event, "")
             skips = 3 if event == Event.full_moon else 2
 
 
@@ -83,7 +88,7 @@ def generate_daylights():
 
 def concialliate(major_queue, minor_queue, major_index, minor_index,
                  major_events, minor_start_event, minor_mid_event,
-                 new_event):
+                 new_event, minor_pad):
     dirty_major = False
     minor_moment = None
     inherited_name = None
@@ -102,26 +107,52 @@ def concialliate(major_queue, minor_queue, major_index, minor_index,
                 minor_index += 1
             if major_index:
                 yield TimedEvent(minor_moment, new_event,
-                    f"{inherited_name}/{minor_index}")
+                 f"{inherited_name}/{str(minor_index).rjust(minor_pad, "0")}")
 
 
 def generate_months():
     return concialliate(
         generate_equinoxes_and_solstices(), generate_moon_phases(),
         0, 0, [Event.equinox, Event.solstice], Event.new_moon, Event.full_moon,
-        Event.month)
+        Event.month, 1)
 
 
 def generate_days():
     return concialliate(
         generate_months(), generate_daylights(),
         0, 0, [Event.month], Event.midnight, Event.noon,
-        Event.day)
+        Event.day, 2)
+
+
+days = list(generate_days())
+
+
+def convert(moment):
+    index = BS.bisect(days, moment, key=lambda day: day.moment)
+    if index in [0, len(days)]:
+        raise OutOfCalendarBoundaries()
+    sections = int((moment - days[index - 1].moment).total_seconds()
+                   * 216 / 86400)
+    return f"{days[index - 1].name} {str(sections).rjust(3, "0")}"
 
 
 def main():
-    for day in generate_days():
+    for day in days:
         print(day)
+
+    print("====NOW")
+    print(convert(DT.datetime.now(DT.timezone.utc)))
+
+    print("====SEASON CHANGES")
+    for moment, _, _ in generate_equinoxes_and_solstices():
+        try: print(convert(moment))
+        except OutOfCalendarBoundaries: pass
+
+    print("====NEW MOONS")
+    for moment, event, _ in generate_moon_phases():
+        if event == Event.new_moon:
+            try: print(convert(moment))
+            except OutOfCalendarBoundaries: pass
 
 
 if __name__ == "__main__":
